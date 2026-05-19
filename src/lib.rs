@@ -1,6 +1,7 @@
 pub mod rustyconnector;
 
 use crate::rustyconnector::client::BackendNode;
+use base64::Engine as _;
 use pumpkin_plugin_api::{Context, Plugin, PluginMetadata};
 use serde::Deserialize;
 use std::fs;
@@ -56,7 +57,7 @@ impl Plugin for RustyRustPlugin {
             description: "RustyConnector backend plugin, written in rust.".into(),
             dependencies: vec![],
             permissions: vec![
-                "network.loopback".into(),
+                "network.outbound".into(),
                 "network.tcp".into(),
                 "network.tcp.connect".into(),
                 "network.dns".into(),
@@ -72,9 +73,9 @@ impl Plugin for RustyRustPlugin {
         let config = load_or_create_config(&_context);
 
         info!(
-        "Registering RustyConnector node {} @ {}...",
-        config.server_name, config.proxy_url
-    );
+            "Registering RustyConnector node {} @ {}...",
+            config.server_name, config.proxy_url
+        );
 
         perform_backend_handshake(&config);
 
@@ -82,7 +83,7 @@ impl Plugin for RustyRustPlugin {
     }
 
     fn on_unload(&mut self, _context: Context) -> pumpkin_plugin_api::Result<()> {
-        info!("Example plugin unloaded. Goodbye!");
+        info!("RustyRust plugin unloaded. Goodbye!");
         Ok(())
     }
 }
@@ -181,12 +182,18 @@ fn perform_backend_handshake(config: &Config) {
     };
 
     match node.perform_handshake() {
-        Ok((endpoint, _compound_token)) => {
+        Ok((endpoint, compound_token)) => {
             info!(
                 "Successfully performed handshake. Dynamic endpoint: {}",
                 endpoint
             );
-            // From here, WebSocket client could be started, e.g. using tungstenite on TcpStream.
+
+            warn!("BLOCKING MAIN THREAD: Connecting to WebSocket directly. The server will not finish starting!");
+
+            // Run it directly on the main thread for testing
+            if let Err(e) = node.connect_websocket(&endpoint, &compound_token) {
+                error!("WebSocket connection failed: {}", e);
+            }
         }
         Err(error) => {
             error!("RustyConnector handshake failed: {}", error);
