@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: "Target"
+        run: rustup target add wasm32-wasip2
       - name: "Build"
         run: cargo build --release
       - name: "Upload Artifact"
