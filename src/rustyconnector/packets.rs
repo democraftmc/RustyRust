@@ -1,6 +1,18 @@
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 
+// Match RustyConnector's exact Java NanoID alphabet
+const ALPHABET: &[char] = &[
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+];
+
+/// Helper to generate a Java-compatible NanoID
+fn generate_rc_nanoid() -> String {
+    nanoid!(16, ALPHABET)
+}
+
 /// Dynamic value parsing enum inside parameters.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
@@ -40,20 +52,15 @@ pub struct RCPacket {
 
 impl RCPacket {
     /// Creates a new MagicLink Protocol V3 packet.
-    ///
-    /// # Arguments
-    /// * `id` - The semantic identity of the packet (e.g. `RC-P`).
-    /// * `source_id` - Our Server's identification string.
-    /// * `target_id` - Optional Target specific routing identifier.
-    /// * `reply` - Determines whether a short NanoID should be baked securely to await a reply.
-    pub fn new(id: &str, source_id: &str, target_id: Option<String>, reply: bool) -> Self {
+    pub fn new(id: &str, source_id: &str, target_id: Option<String>, _reply: bool) -> Self {
         RCPacket {
             v: 3,
             i: id.to_string(),
             s: RCSource {
                 u: source_id.to_string(),
                 n: 2, // Origin::SERVER
-                r: if reply { Some(nanoid!()) } else { None },
+                // Always generate a reply endpoint to prevent Java caching errors
+                r: Some(generate_rc_nanoid()), 
             },
             t: RCTarget {
                 u: target_id,
@@ -71,7 +78,7 @@ impl RCPacket {
             s: RCSource {
                 u: source_id.to_string(),
                 n: 2, // Origin::SERVER
-                r: None,
+                r: Some(generate_rc_nanoid()), // Fixed: Proxy cache strictly requires this
             },
             t: RCTarget {
                 u: None,
@@ -80,7 +87,6 @@ impl RCPacket {
             p: serde_json::Map::new(),
         };
         
-        // Dummy metadata. Is metadata required?
         let meta = serde_json::json!({
             "softCap": 30,
             "hardCap": 40
