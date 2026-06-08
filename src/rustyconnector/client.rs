@@ -1,6 +1,7 @@
 use crate::rustyconnector::crypto::{decrypt_payload, encrypt_payload};
-use crate::rustyconnector::packets::RCPacket;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use pumpkin_plugin_api::scheduler::SchedulerExt;
+use pumpkin_plugin_api::Context;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -8,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::connect;
 use tungstenite::http::header::{HeaderName, HeaderValue, AUTHORIZATION};
-use tungstenite::Message;
 
 pub const PREFLIGHT_PATH: &str = "/bDaBMkmYdZ6r4iFExwW6UzJyNMDseWoS3HDa6FcyM7xNeCmtK98S3Mhp4o7g7oW6VB9CA6GuyH2pNhpQk3QvSmBUeCoUDZ6FXUsFCuVQC59CB2y22SBnGkMf9NMB9UWk";
 
@@ -84,7 +84,13 @@ impl BackendNode {
         Ok((endpoint, compound_enc))
     }
 
-    pub fn connect_websocket(&self, endpoint: &str, compound_token: &str) -> anyhow::Result<()> {
+    pub fn connect_websocket(
+        &self,
+        endpoint: &str,
+        compound_token: &str,
+        context: &Context,
+        backend_ip: &str,
+    ) -> anyhow::Result<()> {
         let ws_url = format!("ws://{}/{}", self.proxy_url, endpoint);
         tracing::info!("Connecting to WebSocket at: {}", ws_url);
 
@@ -109,53 +115,113 @@ impl BackendNode {
         let (mut socket, response) = connect(request)?;
         tracing::info!("WebSocket connected! HTTP Status: {}", response.status());
 
-        // --- HEARTBEAT Websocket. Currently not working
-        let ping_packet = crate::rustyconnector::packets::RCPacket::ping(
-            &self.server_name,              // Exact match to the HTTP Header "u" field
-            "lobby",            // Target Family
-            "vaatigames.fr:25552",  // Address
-            0                   // Player Count
-        );
+        match socket.get_mut() {
+            tungstenite::stream::MaybeTlsStream::Plain(s) => s.set_nonblocking(true)?,
+            _ => tracing::warn!("WSS TLS streams might require inner stream configuration to be non-blocking!"),
+        }
 
-        let ping_json = serde_json::to_string(&ping_packet)?;
-        tracing::info!("Sending Ping JSON: {}", ping_json);
+        let server_name = self.server_name.clone();
+        let backend_ip = backend_ip.to_string();
+        let key = self.key.clone();
+        let session_id = crate::rustyconnector::packets::generate_rc_nanoid();
 
-        let encrypted_ping = encrypt_payload(ping_json.as_bytes(), &self.key);
-        socket.send(tungstenite::Message::Text(encrypted_ping.into()))?;
-        tracing::info!("Sent encrypted Ping packet.");
+        let mut ticks_since_last_ping = 200;
+        let mut ping_interval_ticks = 200;
 
-        // Listen for messages
-        loop {
-            match socket.read() {
-                Ok(msg) => {
-                    tracing::info!("Raw WS msg received: {:?}", msg);
+        // --- NEW: Task Cancellation State ---
+        let mut is_closed = false;
+        let task_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let closure_task_id = task_id.clone();
 
-                    if msg.is_close() {
-                        tracing::info!("WebSocket connection closed by server");
-                        break;
+        let scheduled_id = context.schedule_repeating_task(1, 1, move |_server| {
+            // 1. Short-circuit if the connection is dead
+            if is_closed { return; }
+
+            // --- HEARTBEAT MANAGER ---
+            ticks_since_last_ping += 1;
+
+            if ticks_since_last_ping >= ping_interval_ticks {
+                ticks_since_last_ping = 0;
+
+                let ping_packet = crate::rustyconnector::packets::RCPacket::ping(
+                    &server_name,
+                    &session_id,
+                    "lobby",
+                    &backend_ip,
+                    0
+                );
+
+                if let Ok(ping_json) = serde_json::to_string(&ping_packet) {
+                    let encrypted_ping = encrypt_payload(ping_json.as_bytes(), &key);
+
+                    if let Err(e) = socket.send(tungstenite::Message::Text(encrypted_ping.into())) {
+                        tracing::error!("Fatal send error, closing MagicLink: {}", e);
+                        is_closed = true;
+                        pumpkin_plugin_api::scheduler::cancel_task(closure_task_id.load(std::sync::atomic::Ordering::Relaxed));
+                        return;
+                    } else {
+                        tracing::info!("Sent encrypted Ping heartbeat.");
                     }
+                }
+            }
 
-                    if let tungstenite::Message::Text(text) = msg {
-                        tracing::info!("Attempting to decrypt payload...");
-                        match decrypt_payload(&text, &self.key) {
-                            Ok(decrypted_bytes) => {
-                                let json_str = String::from_utf8_lossy(&decrypted_bytes);
-                                let clean_json = json_str.trim_matches(char::from(0));
-                                tracing::info!("SUCCESS DECRYPTED: {}", clean_json);
-                            },
-                            Err(e) => {
-                                tracing::error!("Decryption failed! Proxy might have sent plaintext. Raw Text: {}", text);
-                                tracing::error!("Decryption Error: {}", e);
+            // --- INCOMING MESSAGE POLLER ---
+            loop {
+                match socket.read() {
+                    Ok(msg) => {
+                        if msg.is_close() {
+                            tracing::info!("WebSocket connection closed cleanly by proxy.");
+                            is_closed = true;
+                            pumpkin_plugin_api::scheduler::cancel_task(closure_task_id.load(std::sync::atomic::Ordering::Relaxed));
+                            break;
+                        }
+
+                        if let tungstenite::Message::Text(text) = msg {
+                            match decrypt_payload(&text, &key) {
+                                Ok(decrypted_bytes) => {
+                                    let json_str = String::from_utf8_lossy(&decrypted_bytes);
+                                    let clean_json = json_str.trim_matches(char::from(0));
+
+                                    if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(clean_json) {
+                                        if parsed_json["i"].as_str() == Some("RC-R") {
+                                            let success = parsed_json["p"]["s"].as_bool().unwrap_or(false);
+                                            let message = parsed_json["p"]["r"].as_str().unwrap_or("No message");
+
+                                            if success {
+                                                tracing::info!("Proxy ACCEPTED registration: {}", message);
+                                                if let Some(interval_secs) = parsed_json["p"]["i"].as_u64() {
+                                                    ping_interval_ticks = interval_secs * 20;
+                                                }
+                                            } else {
+                                                tracing::error!("Proxy REJECTED registration: {}", message);
+                                                tracing::warn!("Backing off ping interval to 60 seconds to prevent proxy spam.");
+                                                ping_interval_ticks = 1200;
+                                            }
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    tracing::error!("Decryption Error: {}", e);
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::error!("Error reading from WebSocket: {}", e);
-                    break;
+                    Err(tungstenite::error::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        break;
+                    }
+                    Err(e) => {
+                        // We hit the closed connection error. Kill the task immediately.
+                        tracing::error!("WebSocket read error. Killing task to prevent spam: {}", e);
+                        is_closed = true;
+                        pumpkin_plugin_api::scheduler::cancel_task(closure_task_id.load(std::sync::atomic::Ordering::Relaxed));
+                        break;
+                    }
                 }
             }
-        }
+        });
+
+        // Store the returned ID into the Atomic pointer so the closure can read it on the next tick
+        task_id.store(scheduled_id, std::sync::atomic::Ordering::Relaxed);
 
         Ok(())
     }

@@ -16,6 +16,8 @@ struct ConfigFile {
     #[serde(default)]
     proxy_url: Option<String>,
     #[serde(default)]
+    backend_ip: Option<String>,
+    #[serde(default)]
     aes: Option<AesSection>,
     #[serde(default, rename = "aes.private")]
     aes_private: Option<String>,
@@ -34,15 +36,17 @@ struct Config {
     server_name: String,
     proxy_url: String,
     private_key: String,
+    backend_ip: String,
+    server_id: String,
 }
 
 const DEFAULT_SERVER_NAME: &str = "rust-node";
 const DEFAULT_PROXY_URL: &str = "127.0.0.1:8080";
-const DEFAULT_PRIVATE_KEY: &str = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=";
+const DEFAULT_PRIVATE_KEY: &str = "";
 const CONFIG_FILE_NAME: &str = "config.yml";
 
 const DEFAULT_CONFIG_CONTENT: &str =
-    "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\naes:\n  private: 'MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE='\n";
+    "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\nbackend_ip: '127.0.0.1:25566'\naes:\n  private: ''\n";
 
 impl Plugin for RustyRustPlugin {
     fn new() -> Self {
@@ -67,17 +71,18 @@ impl Plugin for RustyRustPlugin {
         }
     }
 
-    fn on_load(&mut self, _context: Context) -> pumpkin_plugin_api::Result<()> {
+    fn on_load(&mut self, context: Context) -> pumpkin_plugin_api::Result<()> {
         info!("RCR is starting, connecting to the proxy...");
 
-        let config = load_or_create_config(&_context);
+        let config = load_or_create_config(&context);
 
         info!(
             "Registering RustyConnector node {} @ {}...",
             config.server_name, config.proxy_url
         );
 
-        perform_backend_handshake(&config);
+        // Pass the context down
+        perform_backend_handshake(&config, &context);
 
         Ok(())
     }
@@ -90,14 +95,16 @@ impl Plugin for RustyRustPlugin {
 
 fn load_or_create_config(context: &Context) -> Config {
     let data_folder = std::path::PathBuf::from(context.get_data_folder());
-    if let Err(error) = fs::create_dir_all(&data_folder) {
-        error!(
-            "Failed to create RustyRust data folder {}: {}. Falling back to defaults.",
-            data_folder.display(),
-            error
-        );
-        return default_config();
-    }
+    let _ = fs::create_dir_all(&data_folder); // Ensure folder exists first
+
+    let id_file = data_folder.join("server.id");
+    let server_id = if id_file.exists() {
+        fs::read_to_string(&id_file).unwrap_or_else(|_| crate::rustyconnector::packets::generate_rc_nanoid())
+    } else {
+        let new_id = crate::rustyconnector::packets::generate_rc_nanoid();
+        let _ = fs::write(&id_file, &new_id);
+        new_id
+    };
 
     let config_path = data_folder.join(CONFIG_FILE_NAME);
     if !config_path.exists() {
@@ -127,14 +134,15 @@ fn load_or_create_config(context: &Context) -> Config {
     };
 
     match serde_yaml::from_str::<ConfigFile>(&raw_config) {
-        Ok(parsed) => parsed.into_config(),
+        Ok(parsed) => {
+            let mut config = parsed.into_config();
+            config.server_id = server_id; // Inject the persistent ID here
+            config
+        },
         Err(error) => {
-            error!(
-                "Failed to parse config file {}: {}. Falling back to defaults.",
-                config_path.display(),
-                error
-            );
-            default_config()
+            let mut config = default_config();
+            config.server_id = server_id; // Inject the persistent ID here
+            config
         }
     }
 }
@@ -144,6 +152,8 @@ fn default_config() -> Config {
         server_name: DEFAULT_SERVER_NAME.to_string(),
         proxy_url: DEFAULT_PROXY_URL.to_string(),
         private_key: DEFAULT_PRIVATE_KEY.to_string(),
+        backend_ip: "127.0.0.1:25566".to_string(),
+        server_id: crate::rustyconnector::packets::generate_rc_nanoid(),
     }
 }
 
@@ -157,46 +167,39 @@ impl ConfigFile {
             .unwrap_or_else(|| DEFAULT_PRIVATE_KEY.to_string());
 
         Config {
-            server_name: self
-                .server_name
-                .unwrap_or_else(|| DEFAULT_SERVER_NAME.to_string()),
-            proxy_url: self
-                .proxy_url
-                .unwrap_or_else(|| DEFAULT_PROXY_URL.to_string()),
+            server_name: self.server_name.unwrap_or_else(|| DEFAULT_SERVER_NAME.to_string()),
+            proxy_url: self.proxy_url.unwrap_or_else(|| DEFAULT_PROXY_URL.to_string()),
+            backend_ip: self.backend_ip.unwrap_or_else(|| "127.0.0.1:25566".to_string()),
+            server_id: "".to_string(),
             private_key,
         }
     }
 }
 
-fn perform_backend_handshake(config: &Config) {
+fn perform_backend_handshake(config: &Config, context: &pumpkin_plugin_api::Context) {
     let node = match BackendNode::new(
         &config.private_key,
         &config.proxy_url,
-        &config.server_name,
+        &config.server_id,
     ) {
         Ok(node) => node,
         Err(error) => {
-            error!("Failed to create RustyConnector backend node: {}", error);
+            tracing::error!("Failed to create RustyConnector backend node: {}", error);
             return;
         }
     };
 
     match node.perform_handshake() {
         Ok((endpoint, compound_token)) => {
-            info!(
-                "Successfully performed handshake. Dynamic endpoint: {}",
-                endpoint
-            );
+            tracing::info!("Successfully performed handshake. Dynamic endpoint: {}", endpoint);
 
-            warn!("BLOCKING MAIN THREAD: Connecting to WebSocket directly. The server will not finish starting!");
-
-            // Run it directly on the main thread for testing
-            if let Err(e) = node.connect_websocket(&endpoint, &compound_token) {
-                error!("WebSocket connection failed: {}", e);
+            // Pass the context into the websocket connection
+            if let Err(e) = node.connect_websocket(&endpoint, &compound_token, context, &config.backend_ip) {
+                tracing::error!("WebSocket connection failed: {}", e);
             }
         }
         Err(error) => {
-            error!("RustyConnector handshake failed: {}", error);
+            tracing::error!("RustyConnector handshake failed: {}", error);
         }
     }
 }

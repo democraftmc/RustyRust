@@ -9,7 +9,7 @@ const ALPHABET: &[char] = &[
 ];
 
 /// Helper to generate a Java-compatible NanoID
-fn generate_rc_nanoid() -> String {
+pub fn generate_rc_nanoid() -> String {
     nanoid!(16, ALPHABET)
 }
 
@@ -71,14 +71,14 @@ impl RCPacket {
     }
 
     /// Constructs a Ping packet to maintain the heartbeat and register the server.
-    pub fn ping(source_id: &str, target_family: &str, address: &str, player_count: i32) -> Self {
+    pub fn ping(source_id: &str, session_id: &str, target_family: &str, address: &str, player_count: i32) -> Self {
         let mut packet = RCPacket {
             v: 3,
             i: "RC-P".to_string(),
             s: RCSource {
                 u: source_id.to_string(),
                 n: 2, // Origin::SERVER
-                r: Some(generate_rc_nanoid()), // Fixed: Proxy cache strictly requires this
+                r: Some(session_id.to_string()), // Pass the persistent session ID here
             },
             t: RCTarget {
                 u: None,
@@ -86,12 +86,12 @@ impl RCPacket {
             },
             p: serde_json::Map::new(),
         };
-        
+
         let meta = serde_json::json!({
-            "softCap": 30,
-            "hardCap": 40
-        });
-        
+        "softCap": 30,
+        "hardCap": 40
+    });
+
         packet.p.insert("tf".to_string(), serde_json::json!(target_family));
         packet.p.insert("a".to_string(), serde_json::json!(address));
         packet.p.insert("m".to_string(), meta);
