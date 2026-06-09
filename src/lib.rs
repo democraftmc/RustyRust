@@ -74,7 +74,22 @@ impl Plugin for RustyRustPlugin {
     fn on_load(&mut self, context: Context) -> pumpkin_plugin_api::Result<()> {
         info!("RCR is starting, connecting to the proxy...");
 
-        let config = load_or_create_config(&context);
+        let mut config = load_or_create_config(&context);
+
+        if std::env::var("RUSTYRUST_PRIVATE_KEY").is_ok() {
+            info!("Overriding backend IP with environment variable RUSTYRUST_PRIVATE_KEY (redacted)");
+            config.private_key = std::env::var("RUSTYRUST_PRIVATE_KEY").unwrap_or(config.private_key);
+        }
+
+        if std::env::var("RUSTYRUST_PROXY_URL").is_ok() {
+            info!("Overriding backend IP with environment variable RUSTYRUST_PROXY_URL: {}", config.proxy_url);
+            config.proxy_url = std::env::var("RUSTYRUST_PROXY_URL").unwrap_or(config.proxy_url);
+        }
+
+        if std::env::var("RUSTYRUST_BACKEND_IP").is_ok() {
+            info!("Overriding backend IP with environment variable RUSTYRUST_BACKEND_IP: {}", config.backend_ip);
+            config.backend_ip = std::env::var("RUSTYRUST_BACKEND_IP").unwrap_or(config.backend_ip);
+        }
 
         info!(
             "Registering RustyConnector node {} @ {}...",
