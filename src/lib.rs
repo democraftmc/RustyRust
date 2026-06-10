@@ -1,7 +1,6 @@
 pub mod rustyconnector;
 
 use crate::rustyconnector::client::BackendNode;
-use base64::Engine as _;
 use pumpkin_plugin_api::{Context, Plugin, PluginMetadata};
 use serde::Deserialize;
 use std::fs;
@@ -17,6 +16,8 @@ struct ConfigFile {
     proxy_url: Option<String>,
     #[serde(default)]
     backend_ip: Option<String>,
+    #[serde(default)]
+    target_family: Option<String>,
     #[serde(default)]
     aes: Option<AesSection>,
     #[serde(default, rename = "aes.private")]
@@ -37,16 +38,18 @@ struct Config {
     proxy_url: String,
     private_key: String,
     backend_ip: String,
+    target_family: String,
     server_id: String,
 }
 
 const DEFAULT_SERVER_NAME: &str = "rust-node";
 const DEFAULT_PROXY_URL: &str = "127.0.0.1:8080";
 const DEFAULT_PRIVATE_KEY: &str = "";
+const DEFAULT_TARGET_FAMILY: &str = "lobby";
 const CONFIG_FILE_NAME: &str = "config.yml";
 
 const DEFAULT_CONFIG_CONTENT: &str =
-    "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\nbackend_ip: '127.0.0.1:25566'\naes:\n  private: ''\n";
+    "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\nbackend_ip: '127.0.0.1:25566'\ntarget_family: 'lobby'\naes:\n  private: ''\n";
 
 impl Plugin for RustyRustPlugin {
     fn new() -> Self {
@@ -67,6 +70,9 @@ impl Plugin for RustyRustPlugin {
                 "network.dns".into(),
                 "fs.read.data".into(),
                 "fs.write.data".into(),
+                "sys.env.RUSTYRUST_PROXY_URL".into(),
+                "sys.env.RUSTYRUST_BACKEND_IP".into(),
+                "sys.env.RUSTYRUST_PRIVATE_KEY".into(),
             ],
         }
     }
@@ -77,18 +83,18 @@ impl Plugin for RustyRustPlugin {
         let mut config = load_or_create_config(&context);
 
         if std::env::var("RUSTYRUST_PRIVATE_KEY").is_ok() {
-            info!("Overriding backend IP with environment variable RUSTYRUST_PRIVATE_KEY (redacted)");
             config.private_key = std::env::var("RUSTYRUST_PRIVATE_KEY").unwrap_or(config.private_key);
+            info!("Overriding backend IP with environment variable RUSTYRUST_PRIVATE_KEY (redacted)");
         }
 
         if std::env::var("RUSTYRUST_PROXY_URL").is_ok() {
-            info!("Overriding backend IP with environment variable RUSTYRUST_PROXY_URL: {}", config.proxy_url);
             config.proxy_url = std::env::var("RUSTYRUST_PROXY_URL").unwrap_or(config.proxy_url);
+            info!("Overriding backend IP with environment variable RUSTYRUST_PROXY_URL: {}", config.proxy_url);
         }
 
         if std::env::var("RUSTYRUST_BACKEND_IP").is_ok() {
-            info!("Overriding backend IP with environment variable RUSTYRUST_BACKEND_IP: {}", config.backend_ip);
             config.backend_ip = std::env::var("RUSTYRUST_BACKEND_IP").unwrap_or(config.backend_ip);
+            info!("Overriding backend IP with environment variable RUSTYRUST_BACKEND_IP: {}", config.backend_ip);
         }
 
         info!(
@@ -154,7 +160,7 @@ fn load_or_create_config(context: &Context) -> Config {
             config.server_id = server_id; // Inject the persistent ID here
             config
         },
-        Err(error) => {
+        Err(_error) => {
             let mut config = default_config();
             config.server_id = server_id; // Inject the persistent ID here
             config
@@ -168,6 +174,7 @@ fn default_config() -> Config {
         proxy_url: DEFAULT_PROXY_URL.to_string(),
         private_key: DEFAULT_PRIVATE_KEY.to_string(),
         backend_ip: "127.0.0.1:25566".to_string(),
+        target_family: DEFAULT_TARGET_FAMILY.to_string(),
         server_id: crate::rustyconnector::packets::generate_rc_nanoid(),
     }
 }
@@ -185,6 +192,7 @@ impl ConfigFile {
             server_name: self.server_name.unwrap_or_else(|| DEFAULT_SERVER_NAME.to_string()),
             proxy_url: self.proxy_url.unwrap_or_else(|| DEFAULT_PROXY_URL.to_string()),
             backend_ip: self.backend_ip.unwrap_or_else(|| "127.0.0.1:25566".to_string()),
+            target_family: self.target_family.unwrap_or_else(|| DEFAULT_TARGET_FAMILY.to_string()),
             server_id: "".to_string(),
             private_key,
         }
@@ -209,7 +217,13 @@ fn perform_backend_handshake(config: &Config, context: &pumpkin_plugin_api::Cont
             tracing::info!("Successfully performed handshake. Dynamic endpoint: {}", endpoint);
 
             // Pass the context into the websocket connection
-            if let Err(e) = node.connect_websocket(&endpoint, &compound_token, context, &config.backend_ip) {
+            if let Err(e) = node.connect_websocket(
+                &endpoint,
+                &compound_token,
+                context,
+                &config.backend_ip,
+                &config.target_family,
+            ) {
                 tracing::error!("WebSocket connection failed: {}", e);
             }
         }

@@ -90,6 +90,7 @@ impl BackendNode {
         compound_token: &str,
         context: &Context,
         backend_ip: &str,
+        target_family: &str,
     ) -> anyhow::Result<()> {
         let ws_url = format!("ws://{}/{}", self.proxy_url, endpoint);
         tracing::info!("Connecting to WebSocket at: {}", ws_url);
@@ -122,6 +123,7 @@ impl BackendNode {
 
         let server_name = self.server_name.clone();
         let backend_ip = backend_ip.to_string();
+        let target_family = target_family.to_string();
         let key = self.key.clone();
         let session_id = crate::rustyconnector::packets::generate_rc_nanoid();
 
@@ -146,7 +148,7 @@ impl BackendNode {
                 let ping_packet = crate::rustyconnector::packets::RCPacket::ping(
                     &server_name,
                     &session_id,
-                    "lobby",
+                    &target_family,
                     &backend_ip,
                     0
                 );
