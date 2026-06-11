@@ -91,6 +91,7 @@ impl BackendNode {
         context: &Context,
         backend_ip: &str,
         target_family: &str,
+        state: std::sync::Arc<std::sync::Mutex<crate::PluginState>>, // Passed in from on_load
     ) -> anyhow::Result<()> {
         let ws_url = format!("ws://{}/{}", self.proxy_url, endpoint);
         tracing::info!("Connecting to WebSocket at: {}", ws_url);
@@ -121,6 +122,10 @@ impl BackendNode {
             _ => tracing::warn!("WSS TLS streams might require inner stream configuration to be non-blocking!"),
         }
 
+        // --- NEW: Wrap the socket to share it with the plugin struct ---
+        let shared_socket = std::sync::Arc::new(std::sync::Mutex::new(socket));
+        let closure_socket = shared_socket.clone();
+
         let server_name = self.server_name.clone();
         let backend_ip = backend_ip.to_string();
         let target_family = target_family.to_string();
@@ -130,14 +135,18 @@ impl BackendNode {
         let mut ticks_since_last_ping = 200;
         let mut ping_interval_ticks = 200;
 
-        // --- NEW: Task Cancellation State ---
         let mut is_closed = false;
         let task_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let closure_task_id = task_id.clone();
 
         let scheduled_id = context.schedule_repeating_task(1, 1, move |_server| {
-            // 1. Short-circuit if the connection is dead
             if is_closed { return; }
+
+            // Obtain the lock dynamically each tick to allow on_unload to access it
+            let mut socket = match closure_socket.try_lock() {
+                Ok(s) => s,
+                Err(_) => return, // Wait until the next tick if locked
+            };
 
             // --- HEARTBEAT MANAGER ---
             ticks_since_last_ping += 1;
@@ -212,7 +221,6 @@ impl BackendNode {
                         break;
                     }
                     Err(e) => {
-                        // We hit the closed connection error. Kill the task immediately.
                         tracing::error!("WebSocket read error. Killing task to prevent spam: {}", e);
                         is_closed = true;
                         pumpkin_plugin_api::scheduler::cancel_task(closure_task_id.load(std::sync::atomic::Ordering::Relaxed));
@@ -222,8 +230,15 @@ impl BackendNode {
             }
         });
 
-        // Store the returned ID into the Atomic pointer so the closure can read it on the next tick
         task_id.store(scheduled_id, std::sync::atomic::Ordering::Relaxed);
+
+        // Store everything in the Plugin State
+        if let Ok(mut st) = state.lock() {
+            st.task_id = Some(scheduled_id);
+            st.socket = Some(shared_socket);
+            st.aes_key = Some(self.key.clone());
+            st.server_name = Some(self.server_name.clone());
+        }
 
         Ok(())
     }

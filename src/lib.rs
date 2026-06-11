@@ -4,9 +4,22 @@ use crate::rustyconnector::client::BackendNode;
 use pumpkin_plugin_api::{Context, Plugin, PluginMetadata};
 use serde::Deserialize;
 use std::fs;
+use pumpkin_plugin_api::scheduler::SchedulerExt;
 use tracing::*;
 
-struct RustyRustPlugin;
+type SharedSocket = std::sync::Arc<std::sync::Mutex<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>>>;
+
+#[derive(Default)]
+pub struct PluginState {
+    pub task_id: Option<u32>,
+    pub socket: Option<SharedSocket>,
+    pub aes_key: Option<[u8; 32]>,
+    pub server_name: Option<String>,
+}
+
+struct RustyRustPlugin {
+    state: std::sync::Arc<std::sync::Mutex<PluginState>>,
+}
 
 #[derive(Debug, Deserialize, Default)]
 struct ConfigFile {
@@ -32,7 +45,7 @@ struct AesSection {
     private: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Config {
     server_name: String,
     proxy_url: String,
@@ -53,7 +66,9 @@ const DEFAULT_CONFIG_CONTENT: &str =
 
 impl Plugin for RustyRustPlugin {
     fn new() -> Self {
-        RustyRustPlugin
+        RustyRustPlugin {
+            state: std::sync::Arc::new(std::sync::Mutex::new(PluginState::default())),
+        }
     }
 
     fn metadata(&self) -> PluginMetadata {
@@ -102,13 +117,39 @@ impl Plugin for RustyRustPlugin {
             config.server_name, config.proxy_url
         );
 
-        // Pass the context down
-        perform_backend_handshake(&config, &context);
+        let context_arc = std::sync::Arc::new(context);
+        let state_clone = self.state.clone();
+        perform_backend_handshake(&config, &context_arc, state_clone);
 
         Ok(())
     }
 
     fn on_unload(&mut self, _context: Context) -> pumpkin_plugin_api::Result<()> {
+        info!("RustyRust plugin unloading. Sending disconnect packet...");
+
+        if let Ok(mut st) = self.state.lock() {
+            // Cancel the repeating task
+            if let Some(id) = st.task_id {
+                pumpkin_plugin_api::scheduler::cancel_task(id);
+                st.task_id = None;
+            }
+
+            // Send the RC-D packet
+            if let (Some(socket_arc), Some(key), Some(server_name)) = (&st.socket, &st.aes_key, &st.server_name) {
+                if let Ok(mut socket) = socket_arc.lock() {
+                    let disconnect_packet = crate::rustyconnector::packets::RCPacket::disconnect(server_name);
+
+                    if let Ok(json) = serde_json::to_string(&disconnect_packet) {
+                        let encrypted = crate::rustyconnector::crypto::encrypt_payload(json.as_bytes(), key);
+                        let _ = socket.send(tungstenite::Message::Text(encrypted.into()));
+                    }
+
+                    let _ = socket.close(None);
+                    info!("Disconnect packet sent and socket closed.");
+                }
+            }
+        }
+
         info!("RustyRust plugin unloaded. Goodbye!");
         Ok(())
     }
@@ -116,7 +157,7 @@ impl Plugin for RustyRustPlugin {
 
 fn load_or_create_config(context: &Context) -> Config {
     let data_folder = std::path::PathBuf::from(context.get_data_folder());
-    let _ = fs::create_dir_all(&data_folder); // Ensure folder exists first
+    let _ = fs::create_dir_all(&data_folder);
 
     let id_file = data_folder.join("server.id");
     let server_id = if id_file.exists() {
@@ -135,11 +176,15 @@ fn load_or_create_config(context: &Context) -> Config {
                 config_path.display(),
                 error
             );
-            return default_config();
+            let mut config = default_config();
+            config.server_id = server_id;
+            return config;
         }
 
         info!("Generated default RustyRust config at {}", config_path.display());
-        return default_config();
+        let mut config = default_config();
+        config.server_id = server_id;
+        return config;
     }
 
     let raw_config = match fs::read_to_string(&config_path) {
@@ -150,19 +195,21 @@ fn load_or_create_config(context: &Context) -> Config {
                 config_path.display(),
                 error
             );
-            return default_config();
+            let mut config = default_config();
+            config.server_id = server_id;
+            return config;
         }
     };
 
     match serde_yaml::from_str::<ConfigFile>(&raw_config) {
         Ok(parsed) => {
             let mut config = parsed.into_config();
-            config.server_id = server_id; // Inject the persistent ID here
+            config.server_id = server_id;
             config
         },
         Err(_error) => {
             let mut config = default_config();
-            config.server_id = server_id; // Inject the persistent ID here
+            config.server_id = server_id;
             config
         }
     }
@@ -199,7 +246,7 @@ impl ConfigFile {
     }
 }
 
-fn perform_backend_handshake(config: &Config, context: &pumpkin_plugin_api::Context) {
+fn perform_backend_handshake(config: &Config, context: &std::sync::Arc<Context>, state: std::sync::Arc<std::sync::Mutex<PluginState>>) {
     let node = match BackendNode::new(
         &config.private_key,
         &config.proxy_url,
@@ -208,6 +255,16 @@ fn perform_backend_handshake(config: &Config, context: &pumpkin_plugin_api::Cont
         Ok(node) => node,
         Err(error) => {
             tracing::error!("Failed to create RustyConnector backend node: {}", error);
+
+            let config_clone = config.clone();
+            let context_clone = context.clone();
+            let state_clone = state.clone();
+            tracing::warn!("Retrying handshake in 60 seconds...");
+
+            context.schedule_delayed_task(1200, move |_| {
+                perform_backend_handshake(&config_clone, &context_clone, state_clone.clone())
+            });
+
             return;
         }
     };
@@ -216,19 +273,28 @@ fn perform_backend_handshake(config: &Config, context: &pumpkin_plugin_api::Cont
         Ok((endpoint, compound_token)) => {
             tracing::info!("Successfully performed handshake. Dynamic endpoint: {}", endpoint);
 
-            // Pass the context into the websocket connection
             if let Err(e) = node.connect_websocket(
                 &endpoint,
                 &compound_token,
                 context,
                 &config.backend_ip,
                 &config.target_family,
+                state,
             ) {
                 tracing::error!("WebSocket connection failed: {}", e);
             }
         }
         Err(error) => {
             tracing::error!("RustyConnector handshake failed: {}", error);
+
+            let config_clone = config.clone();
+            let context_clone = context.clone();
+            let state_clone = state.clone();
+            tracing::warn!("Retrying handshake in 10 seconds...");
+
+            context.schedule_delayed_task(200, move |_| {
+                perform_backend_handshake(&config_clone, &context_clone, state_clone.clone())
+            });
         }
     }
 }
