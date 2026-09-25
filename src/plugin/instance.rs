@@ -40,6 +40,7 @@ impl Plugin for RustyRustPlugin {
                 "sys.env.RUSTYRUST_PROXY_URL".into(),
                 "sys.env.RUSTYRUST_BACKEND_IP".into(),
                 "sys.env.RUSTYRUST_PRIVATE_KEY".into(),
+                "sys.env.RUSTYRUST_SERVER_ID".into(),
             ],
         }
     }
@@ -75,6 +76,14 @@ impl Plugin for RustyRustPlugin {
             crate::log_info!(
                 "Overriding external IP routing dynamically with environment variable RUSTYRUST_BACKEND_IP: {}",
                 config.backend_ip
+            );
+        }
+
+        if let Ok(env_id) = std::env::var("RUSTYRUST_SERVER_ID") {
+            config.server_id = env_id;
+            crate::log_info!(
+                "Overriding server ID dynamically with environment variable RUSTYRUST_SERVER_ID: {}",
+                config.server_id
             );
         }
 
