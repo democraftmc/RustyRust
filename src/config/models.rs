@@ -36,6 +36,8 @@ pub struct ConfigFile {
     /// Legacy mapping for the primary authentication key.
     #[serde(default, rename = "private_key")]
     pub legacy_private_key: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// The inner structure of the AES configuration segment.
@@ -56,6 +58,7 @@ pub struct Config {
     pub backend_ip: String,
     pub target_family: String,
     pub server_id: String,
+    pub metadata: serde_json::Value,
 }
 
 impl ConfigFile {
@@ -86,6 +89,7 @@ impl ConfigFile {
                 .target_family
                 .unwrap_or_else(|| DEFAULT_TARGET_FAMILY.to_string()),
             server_id: "".to_string(), // Injected later by the loader
+            metadata: self.metadata.unwrap_or_else(|| serde_json::json!({ "hardCap": 40 })),
             private_key,
         }
     }

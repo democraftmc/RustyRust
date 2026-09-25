@@ -15,7 +15,7 @@ pub const DEFAULT_TARGET_FAMILY: &str = "lobby";
 pub const CONFIG_FILE_NAME: &str = "config.yml";
 
 /// The structural YAML string output whenever the plugin creates a fresh file layout.
-pub const DEFAULT_CONFIG_CONTENT: &str = "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\nbackend_ip: '127.0.0.1:25566'\ntarget_family: 'lobby'\naes:\n  private: ''\n";
+pub const DEFAULT_CONFIG_CONTENT: &str = "server_name: 'rust-node'\nproxy_url: '127.0.0.1:8080'\nbackend_ip: '127.0.0.1:25566'\ntarget_family: 'lobby'\naes:\n  private: ''\nmetadata:\n  hardCap: 40\n";
 
 /// Spawns an entirely untouched, pristine `Config` object using module defaults.
 ///
@@ -28,5 +28,8 @@ pub fn default_config() -> Config {
         backend_ip: "127.0.0.1:25566".to_string(),
         target_family: DEFAULT_TARGET_FAMILY.to_string(),
         server_id: generate_rc_nanoid(),
+        metadata: serde_json::json!({
+            "hardCap": 40
+        })
     }
 }

@@ -33,9 +33,8 @@ impl BackendNode {
         &self,
         endpoint: &str,
         compound_token: &str,
-        context: &Context,
-        backend_ip: &str,
-        target_family: &str,
+        context: &std::sync::Arc<Context>,
+        config: &crate::config::models::Config,
         state: std::sync::Arc<std::sync::Mutex<PluginState>>,
     ) -> anyhow::Result<()> {
         let ws_url = format!("ws://{}/{}", self.proxy_url, endpoint);
@@ -80,8 +79,11 @@ impl BackendNode {
         let closure_socket = shared_socket.clone();
 
         let server_name = self.server_name.clone();
-        let backend_ip = backend_ip.to_string();
-        let target_family = target_family.to_string();
+        let backend_ip = config.backend_ip.to_string();
+        let target_family = config.target_family.to_string();
+        let config_arc = config.clone();
+        let state_arc = state.clone();
+        let context_arc = context.clone();
         let key = self.key;
         let session_id = generate_rc_nanoid();
 
@@ -108,6 +110,10 @@ impl BackendNode {
                 &target_family,
                 &backend_ip,
                 &key,
+                &config_arc.metadata,
+                &context_arc,
+                &config_arc,
+                &state_arc,
             );
         });
 

@@ -126,7 +126,8 @@ impl Plugin for RustyRustPlugin {
                             crate::crypto::encryption::encrypt_payload(json.as_bytes(), key);
                         let _ = socket.send(tungstenite::Message::Text(encrypted.into()));
                     }
-
+                    
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     let _ = socket.close(None);
                     crate::log_info!(
                         "Disconnect packet sent explicitly and local TCP connection cleanly exited."
@@ -206,8 +207,7 @@ pub fn perform_backend_handshake(
                 &endpoint,
                 &compound_token,
                 context,
-                &config.backend_ip,
-                &config.target_family,
+                config,
                 state,
             ) {
                 crate::log_error!(

@@ -43,6 +43,10 @@ pub struct RCTarget {
 
     /// The target node type. (1 is commonly the central broker).
     pub n: i32,
+
+    /// Request mapping ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r: Option<String>,
 }
 
 /// The top-level format of a RustyConnector Packet.

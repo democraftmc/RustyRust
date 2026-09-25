@@ -25,7 +25,7 @@ impl RCPacket {
                 n: 2,
                 r: Some(generate_rc_nanoid()),
             },
-            t: RCTarget { u: target_id, n: 1 },
+            t: RCTarget { u: target_id, n: 1, r: None },
             p: serde_json::Map::new(),
         }
     }
@@ -51,6 +51,7 @@ impl RCPacket {
         target_family: &str,
         address: &str,
         player_count: i32,
+        metadata: serde_json::Value,
     ) -> Self {
         let mut packet = RCPacket {
             v: 3,
@@ -60,21 +61,16 @@ impl RCPacket {
                 n: 2,
                 r: Some(session_id.to_string()),
             },
-            t: RCTarget { u: None, n: 1 },
+            t: RCTarget { u: None, n: 1, r: None },
             p: serde_json::Map::new(),
         };
 
         // Inject the payload arguments required by the proxy
-        let meta = serde_json::json!({
-            "softCap": 30,
-            "hardCap": 40
-        });
-
         packet
             .p
             .insert("tf".to_string(), serde_json::json!(target_family));
         packet.p.insert("a".to_string(), serde_json::json!(address));
-        packet.p.insert("m".to_string(), meta);
+        packet.p.insert("m".to_string(), metadata);
         packet
             .p
             .insert("pc".to_string(), serde_json::json!(player_count));
@@ -102,8 +98,29 @@ impl RCPacket {
                 n: 2,
                 r: None,
             },
-            t: RCTarget { u: None, n: 1 },
+            t: RCTarget { u: None, n: 1, r: None },
             p: serde_json::Map::new(),
         }
     }
+
+    /// Constructs an `RC-R` (Response) packet.
+    /// Sent back to proxy following a proxy request (e.g. `RC-P`).
+    pub fn response(source_id: &str, request_id: Option<String>, success: bool, message: &str) -> Self {
+        let mut p = serde_json::Map::new();
+        p.insert("s".to_string(), serde_json::json!(success));
+        p.insert("r".to_string(), serde_json::json!(message));
+        
+        RCPacket {
+            v: 3,
+            i: "RC-R".to_string(),
+            s: RCSource {
+                u: source_id.to_string(),
+                n: 2,
+                r: None, 
+            },
+            t: RCTarget { u: None, n: 1, r: request_id },
+            p,
+        }
+    }
+
 }
