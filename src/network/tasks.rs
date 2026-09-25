@@ -3,10 +3,10 @@
 use crate::crypto::decryption::decrypt_payload;
 use crate::crypto::encryption::encrypt_payload;
 use crate::packets::models::RCPacket;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::plugin::instance::perform_backend_handshake;
 use pumpkin_plugin_api::scheduler::SchedulerExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Manages the actual synchronous block logic of checking the active magical socket linkage.
 /// Will query and verify connection states, attempt sending out Heartbeat events,
@@ -58,7 +58,14 @@ pub fn process_websocket_tick(
     if current_ticks >= closure_interval.load(Ordering::Relaxed) {
         closure_ticks.store(0, Ordering::Relaxed);
 
-        let ping_packet = RCPacket::ping(server_name, session_id, target_family, backend_ip, 0, metadata.clone());
+        let ping_packet = RCPacket::ping(
+            server_name,
+            session_id,
+            target_family,
+            backend_ip,
+            0,
+            metadata.clone(),
+        );
 
         if let Ok(ping_json) = serde_json::to_string(&ping_packet) {
             let encrypted_ping = encrypt_payload(ping_json.as_bytes(), key);
@@ -68,7 +75,7 @@ pub fn process_websocket_tick(
                 trigger_reconnect(closure_is_closed, closure_task_id, context, config, state);
                 return;
             } else {
-                crate::log_info!("Sent encrypted Ping heartbeat.");
+                crate::log_debug!("Sent encrypted Ping heartbeat.");
             }
         }
     }
@@ -95,28 +102,56 @@ pub fn process_websocket_tick(
                             {
                                 // Checking for Registration Request Response (RC-R)
                                 if parsed_json["i"].as_str() == Some("RC-P") {
-                                    let request_id = parsed_json.get("s").and_then(|t| t.get("r")).and_then(|r| r.as_str()).map(|s| s.to_string());
-                                    let response_packet = RCPacket::response(server_name, request_id, true, "Successfully received proxy ping.");
+                                    let request_id = parsed_json
+                                        .get("s")
+                                        .and_then(|t| t.get("r"))
+                                        .and_then(|r| r.as_str())
+                                        .map(|s| s.to_string());
+                                    let response_packet = RCPacket::response(
+                                        server_name,
+                                        request_id,
+                                        true,
+                                        "Successfully received proxy ping.",
+                                    );
                                     if let Ok(json) = serde_json::to_string(&response_packet) {
-                                        let encrypted = crate::crypto::encryption::encrypt_payload(json.as_bytes(), key);
-                                        let _ = socket.send(tungstenite::Message::Text(encrypted.into()));
+                                        let encrypted = crate::crypto::encryption::encrypt_payload(
+                                            json.as_bytes(),
+                                            key,
+                                        );
+                                        let _ = socket
+                                            .send(tungstenite::Message::Text(encrypted.into()));
                                     }
                                 } else if parsed_json["i"].as_str() == Some("RC-R") {
-                                    if let Some(req_id) = parsed_json.get("t").and_then(|t| t.get("r")).and_then(|r| r.as_str()) {
+                                    if let Some(req_id) = parsed_json
+                                        .get("t")
+                                        .and_then(|t| t.get("r"))
+                                        .and_then(|r| r.as_str())
+                                    {
                                         if req_id == session_id {
-                                            let success = parsed_json["p"]["s"].as_bool().unwrap_or(false);
-                                            let message =
-                                                parsed_json["p"]["r"].as_str().unwrap_or("No message");
-        
+                                            let success =
+                                                parsed_json["p"]["s"].as_bool().unwrap_or(false);
+                                            let message = parsed_json["p"]["r"]
+                                                .as_str()
+                                                .unwrap_or("No message");
+
                                             if success {
-                                                crate::log_info!("Proxy ACCEPTED registration: {}", message);
-                                                if let Some(interval_secs) = parsed_json["p"]["i"].as_u64()
+                                                crate::log_info!(
+                                                    "Proxy ACCEPTED registration: {}",
+                                                    message
+                                                );
+                                                if let Some(interval_secs) =
+                                                    parsed_json["p"]["i"].as_u64()
                                                 {
-                                                    closure_interval
-                                                        .store(interval_secs * 20, Ordering::Relaxed);
+                                                    closure_interval.store(
+                                                        interval_secs * 20,
+                                                        Ordering::Relaxed,
+                                                    );
                                                 }
                                             } else {
-                                                crate::log_error!("Proxy REJECTED registration: {}", message);
+                                                crate::log_error!(
+                                                    "Proxy REJECTED registration: {}",
+                                                    message
+                                                );
                                                 crate::log_warn!(
                                                     "Backing off ping interval to 60 seconds to prevent proxy spam."
                                                 );
